@@ -41,6 +41,44 @@ def build_admin_router(cfg: Config, sheets: SheetsService) -> Router:
         """Якщо задано BOT_TOPIC_ID — команди працюють лише в темі «Замовлення»."""
         return cfg.bot_topic_id is None or message.message_thread_id == cfg.bot_topic_id
 
+    @router.message(Command("importclients"))
+    async def cmd_import_clients(message: Message):
+        """Разова міграція: клієнти зі старої локальної SQLite → вкладка «Клієнти»."""
+        if not _allowed_here(message):
+            return
+        legacy = db.all_clients()
+        if not legacy:
+            await message.reply("У локальній базі клієнтів немає — імпортувати нічого.")
+            return
+        try:
+            existing = {uid for uid, _, _ in await sheets.all_clients()}
+        except Exception:
+            log.exception("Імпорт клієнтів: не вдалося прочитати Таблицю")
+            await message.reply("❌ Не вдалося прочитати вкладку «Клієнти».")
+            return
+
+        added = skipped = failed = 0
+        for user_id, full_name, username in legacy:
+            if user_id in existing:
+                skipped += 1
+                continue
+            try:
+                await sheets.upsert_client(user_id, full_name, username)
+                added += 1
+            except Exception:
+                failed += 1
+                log.warning("Імпорт клієнтів: не вдалося додати %s", user_id, exc_info=True)
+
+        report = (
+            f"📥 <b>Імпорт зі старої бази.</b>\n"
+            f"Знайдено локально: {len(legacy)}\n"
+            f"➕ Додано в Таблицю: {added}\n"
+            f"↩️ Уже були: {skipped}"
+        )
+        if failed:
+            report += f"\n⚠️ Помилки: {failed}"
+        await message.reply(report)
+
     @router.message(Command("mailings"))
     async def cmd_mailings(message: Message, command: CommandObject, bot: Bot):
         """Reply на повідомлення + /mailings «товар»|«івент» → розсилка всім клієнтам."""
