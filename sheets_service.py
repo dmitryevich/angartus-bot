@@ -205,7 +205,17 @@ class SheetsService:
         if time.monotonic() - self._tpl_cached_at < TEMPLATES_TTL:
             return self._tpl_cache
         rng = f"{self._templates_sheet}!A2:C1000"
-        res = await self._run(self._values().get(spreadsheetId=self._spreadsheet_id, range=rng))
+        try:
+            res = await self._run(
+                self._values().get(spreadsheetId=self._spreadsheet_id, range=rng)
+            )
+        except Exception:
+            # Вкладки «Шаблони» може просто не бути — тоді авто-відповіді вимкнені.
+            # Кешуємо порожній результат, щоб не смикати API на кожне повідомлення.
+            log.info("Вкладка «%s» недоступна — авто-відповіді вимкнені", self._templates_sheet)
+            self._tpl_cache = []
+            self._tpl_cached_at = time.monotonic()
+            return []
         templates = []
         for row in res.get("values", []):
             row = row + [""] * (3 - len(row))
