@@ -9,12 +9,12 @@ from aiogram.types import Message
 
 import db
 from config import Config
-from notion_service import NotionService
+from sheets_service import SheetsService
 
 log = logging.getLogger(__name__)
 
 
-def build_client_router(cfg: Config, notion: NotionService) -> Router:
+def build_client_router(cfg: Config, sheets: SheetsService) -> Router:
     router = Router(name="client")
     router.message.filter(F.chat.type == "private", StateFilter(None))
 
@@ -26,6 +26,11 @@ def build_client_router(cfg: Config, notion: NotionService) -> Router:
 
         user = message.from_user
         db.upsert_client(user.id, user.full_name, user.username)
+        # Паралельно ведемо базу розсилки у вкладці «Клієнти»
+        try:
+            await sheets.upsert_client(user.id, user.full_name, user.username)
+        except Exception:
+            log.warning("Не вдалося записати клієнта %s у Таблицю", user.id, exc_info=True)
 
         # Пересилаємо повідомлення в тему «Замовлення» і запам'ятовуємо,
         # від кого воно, — щоб reply адміна повернувся клієнту
@@ -52,7 +57,7 @@ def build_client_router(cfg: Config, notion: NotionService) -> Router:
             return
 
         text = message.text or message.caption or ""
-        answer = await notion.find_answer(text) if text else None
+        answer = await sheets.find_answer(text) if text else None
 
         who = f"@{user.username}" if user.username else user.full_name
         try:

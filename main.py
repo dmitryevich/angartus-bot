@@ -9,25 +9,27 @@ from aiogram.enums import ParseMode
 import db
 from config import Config, load_config
 from handlers import build_admin_router, build_client_router, build_order_router
-from notion_service import NotionService
+from sheets_service import SheetsService
 
 log = logging.getLogger(__name__)
 
 FLUSH_INTERVAL = 60  # секунд між спробами довантажити офлайн-чергу
 
 
-async def pending_flush_loop(bot: Bot, cfg: Config, notion: NotionService) -> None:
+async def pending_flush_loop(bot: Bot, cfg: Config, sheets: SheetsService) -> None:
     while True:
         await asyncio.sleep(FLUSH_INTERVAL)
         try:
-            if not notion.pending_count():
+            if not sheets.pending_count():
                 continue
-            flushed = await notion.flush_pending()
+            flushed = await sheets.flush_pending()
             if flushed:
-                nums = ", ".join(f"#{n}" for n in flushed)
+                for item in flushed:
+                    db.map_order_row(item["number"], item["row"])
+                nums = ", ".join(f"#{item['number']}" for item in flushed)
                 await bot.send_message(
                     cfg.admin_group_id,
-                    f"✅ Зв'язок із Notion відновлено. Довантажено замовлення: {nums}.",
+                    f"✅ Зв'язок із Google Таблицею відновлено. Довантажено замовлення: {nums}.",
                     message_thread_id=cfg.bot_topic_id,
                 )
         except Exception:
@@ -41,16 +43,16 @@ async def main() -> None:
     )
     cfg = load_config()
     db.init_db(cfg.db_path)
-    notion = NotionService(cfg)
+    sheets = SheetsService(cfg)
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     # Порядок важливий: команди/FSM → адмін-група → всі інші повідомлення клієнтів
-    dp.include_router(build_order_router(cfg, notion))
-    dp.include_router(build_admin_router(cfg, notion))
-    dp.include_router(build_client_router(cfg, notion))
+    dp.include_router(build_order_router(cfg, sheets))
+    dp.include_router(build_admin_router(cfg, sheets))
+    dp.include_router(build_client_router(cfg, sheets))
 
-    flush_task = asyncio.create_task(pending_flush_loop(bot, cfg, notion))
+    flush_task = asyncio.create_task(pending_flush_loop(bot, cfg, sheets))
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         log.info("Бот запущено")

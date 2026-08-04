@@ -32,6 +32,16 @@ def init_db(path: str) -> None:
         )
         """
     )
+    # Зв'язка «№ замовлення (показуємо клієнту) -> рядок у Google Таблиці»,
+    # бо сама таблиця номер замовлення не зберігає
+    _conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_rows (
+            order_number INTEGER PRIMARY KEY,
+            sheet_row    INTEGER NOT NULL UNIQUE
+        )
+        """
+    )
     _conn.commit()
 
 
@@ -51,10 +61,15 @@ def user_by_group_message(group_msg_id: int) -> int | None:
     return row[0] if row else None
 
 
+FIRST_ORDER_NUMBER = 100
+
+
 def next_order_number() -> int:
     with _lock:
+        # Стартуємо з FIRST_ORDER_NUMBER: лічильник тримаємо на одиницю меншим
         _conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('order_counter', 0) ON CONFLICT(key) DO NOTHING"
+            "INSERT INTO meta (key, value) VALUES ('order_counter', ?) ON CONFLICT(key) DO NOTHING",
+            (FIRST_ORDER_NUMBER - 1,),
         )
         _conn.execute("UPDATE meta SET value = value + 1 WHERE key = 'order_counter'")
         row = _conn.execute("SELECT value FROM meta WHERE key = 'order_counter'").fetchone()
@@ -73,6 +88,14 @@ def upsert_client(user_id: int, full_name: str, username: str | None) -> None:
             (user_id, full_name, username),
         )
         _conn.commit()
+
+
+def all_clients() -> list[tuple[int, str | None, str | None]]:
+    """Усі, хто бодай раз писав боту: (user_id, full_name, username) — для розсилки."""
+    rows = _conn.execute(
+        "SELECT user_id, full_name, username FROM clients ORDER BY user_id"
+    ).fetchall()
+    return [(r[0], r[1], r[2]) for r in rows]
 
 
 def get_topic(user_id: int) -> int | None:
@@ -100,3 +123,26 @@ def set_paused(user_id: int, paused: bool) -> None:
     with _lock:
         _conn.execute("UPDATE clients SET paused = ? WHERE user_id = ?", (int(paused), user_id))
         _conn.commit()
+
+
+def map_order_row(order_number: int, sheet_row: int) -> None:
+    with _lock:
+        _conn.execute(
+            "INSERT OR REPLACE INTO order_rows (order_number, sheet_row) VALUES (?, ?)",
+            (order_number, sheet_row),
+        )
+        _conn.commit()
+
+
+def row_for_order(order_number: int) -> int | None:
+    row = _conn.execute(
+        "SELECT sheet_row FROM order_rows WHERE order_number = ?", (order_number,)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def order_for_row(sheet_row: int) -> int | None:
+    row = _conn.execute(
+        "SELECT order_number FROM order_rows WHERE sheet_row = ?", (sheet_row,)
+    ).fetchone()
+    return row[0] if row else None
