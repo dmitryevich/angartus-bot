@@ -1,4 +1,4 @@
-"""Точка входу: Telegram-бот замовлень з Notion як сховищем даних."""
+"""Точка входу: Telegram-бот замовлень з Google Таблицею як сховищем даних."""
 import asyncio
 import logging
 

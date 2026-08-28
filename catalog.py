@@ -30,18 +30,6 @@ CATEGORIES: tuple[Category, ...] = (
             ),
         ),
     ),
-    Category(
-        id="merch",
-        title="👕 Мерч",
-        products=(
-            Product(
-                id="pin_patronus",
-                title="Пін «Anghartus Patronus»",
-                price=575,
-                description="Посріблений лімітований пін.\nРозмір: 5.8 см",
-            ),
-        ),
-    ),
 )
 
 CATEGORY_BY_ID = {c.id: c for c in CATEGORIES}
