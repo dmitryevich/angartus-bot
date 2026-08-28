@@ -25,7 +25,7 @@ async def pending_flush_loop(bot: Bot, cfg: Config, sheets: SheetsService) -> No
             flushed = await sheets.flush_pending()
             if flushed:
                 for item in flushed:
-                    db.map_order_row(item["number"], item["row"])
+                    db.map_order_row(item["number"], item["row"], item.get("user_id"))
                 nums = ", ".join(f"#{item['number']}" for item in flushed)
                 await bot.send_message(
                     cfg.admin_group_id,

@@ -33,15 +33,23 @@ def init_db(path: str) -> None:
         """
     )
     # Зв'язка «№ замовлення (показуємо клієнту) -> рядок у Google Таблиці»,
-    # бо сама таблиця номер замовлення не зберігає
+    # бо сама таблиця номер замовлення не зберігає.
+    # user_id тримаємо тут же — інакше за номером замовлення нема кому писати
+    # про зміну статусу і нема з чого зібрати «Мої замовлення».
     _conn.execute(
         """
         CREATE TABLE IF NOT EXISTS order_rows (
             order_number INTEGER PRIMARY KEY,
-            sheet_row    INTEGER NOT NULL UNIQUE
+            sheet_row    INTEGER NOT NULL UNIQUE,
+            user_id      INTEGER
         )
         """
     )
+    # Міграція для баз, створених до появи user_id (том Railway переживає деплой)
+    columns = {r[1] for r in _conn.execute("PRAGMA table_info(order_rows)")}
+    if "user_id" not in columns:
+        _conn.execute("ALTER TABLE order_rows ADD COLUMN user_id INTEGER")
+    _conn.execute("CREATE INDEX IF NOT EXISTS idx_order_rows_user ON order_rows(user_id)")
     _conn.commit()
 
 
@@ -125,13 +133,33 @@ def set_paused(user_id: int, paused: bool) -> None:
         _conn.commit()
 
 
-def map_order_row(order_number: int, sheet_row: int) -> None:
+def map_order_row(order_number: int, sheet_row: int, user_id: int | None = None) -> None:
     with _lock:
         _conn.execute(
-            "INSERT OR REPLACE INTO order_rows (order_number, sheet_row) VALUES (?, ?)",
-            (order_number, sheet_row),
+            "INSERT OR REPLACE INTO order_rows (order_number, sheet_row, user_id) VALUES (?, ?, ?)",
+            (order_number, sheet_row, user_id),
         )
         _conn.commit()
+
+
+def user_for_order(order_number: int) -> int | None:
+    """Кому належить замовлення. None для старих записів без user_id."""
+    row = _conn.execute(
+        "SELECT user_id FROM order_rows WHERE order_number = ?", (order_number,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def orders_for_user(user_id: int, limit: int = 10) -> list[tuple[int, int]]:
+    """[(номер замовлення, рядок у Таблиці), ...] — найновіші спершу."""
+    return [
+        (r[0], r[1])
+        for r in _conn.execute(
+            "SELECT order_number, sheet_row FROM order_rows WHERE user_id = ? "
+            "ORDER BY order_number DESC LIMIT ?",
+            (user_id, limit),
+        )
+    ]
 
 
 def row_for_order(order_number: int) -> int | None:

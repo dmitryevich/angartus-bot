@@ -99,7 +99,18 @@ def ikb(*rows: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 def main_kb() -> InlineKeyboardMarkup:
-    return ikb([("🛒 Замовити", "menu:cats")], [("✉️ Зв'язок", "menu:contact")])
+    return ikb(
+        [("🛒 Замовити", "menu:cats")],
+        [("📖 Мої замовлення", "menu:orders")],
+        [("✉️ Зв'язок", "menu:contact")],
+    )
+
+
+def orders_kb(orders: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    """Список замовлень клієнта — інлайн, по кнопці на замовлення."""
+    rows = [[(label, f"myord:{number}")] for number, label in orders]
+    rows.append([(BACK, "menu:main")])
+    return ikb(*rows)
 
 
 def back_kb(target: str = "menu:main") -> InlineKeyboardMarkup:
@@ -174,6 +185,45 @@ def cart_plain(cart: dict) -> str:
         if product:
             parts.append(f"{product.title} ×{qty}")
     return ", ".join(parts)
+
+
+def order_status(o: dict) -> str:
+    """Статус словами. Свіже замовлення ще не має рядка в Таблиці — тоді «Прийнято»."""
+    if "packed" not in o:
+        return "✅ Прийнято"
+    if o.get("ttn"):
+        return "🚚 Відправлено"
+    return "🟢 Запаковано" if o["packed"] else "🟡 В роботі"
+
+
+def order_card(number: int, o: dict, total: int | None = None) -> str:
+    """Картка замовлення — і одразу після оформлення, і в «Моїх замовленнях»."""
+    fio = " ".join(
+        p for p in (o.get("surname"), o.get("name"), o.get("patronymic")) if p
+    ).strip()
+    place = ", ".join(p for p in (o.get("region"), o.get("district"), o.get("city")) if p)
+
+    lines = [
+        f"🧾 <b>Замовлення №{number}</b>",
+        f"Статус: <b>{order_status(o)}</b>",
+    ]
+    if o.get("ttn"):
+        lines.append(f"📦 ТТН: <code>{html.escape(o['ttn'])}</code>")
+    lines += [
+        "",
+        f"👤 {html.escape(fio) or '—'}",
+        f"📱 {html.escape(o.get('phone') or '—')}",
+        "",
+        f"🚚 {html.escape(o.get('delivery_type') or '—')}",
+        f"📍 {html.escape(place) or '—'}",
+        f"🏠 {html.escape(o.get('address') or '—')}",
+        "",
+        "🛒 <b>Замовлення:</b>",
+        html.escape(o.get("items") or "—"),
+    ]
+    if total is not None:
+        lines.append(f"\n💰 Разом: <b>{total} грн</b>")
+    return "\n".join(lines)
 
 
 def review_text(data: dict) -> str:
@@ -311,6 +361,60 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
         await state.set_state(None)
         await swap(callback, "🗂 Оберіть категорію:", categories_kb())
         await state.update_data(screen_msg_id=callback.message.message_id)
+        await callback.answer()
+
+    # ---------- мої замовлення ----------
+
+    @router.callback_query(F.data == "menu:orders")
+    async def cb_my_orders(callback: CallbackQuery, state: FSMContext):
+        await state.set_state(None)
+        pairs = db.orders_for_user(callback.from_user.id, limit=10)
+        if not pairs:
+            await swap(
+                callback,
+                "📖 У вас поки що немає замовлень.",
+                back_kb("menu:main"),
+            )
+            await callback.answer()
+            return
+
+        buttons: list[tuple[int, str]] = []
+        for number, row in pairs:
+            try:
+                o = await sheets.get_order(row)
+            except Exception:
+                log.warning("Таблиця недоступна при читанні замовлення #%s", number, exc_info=True)
+                o = None
+            # Підпис кнопки — номер і статус, щоб не тицяти навмання
+            suffix = f" — {order_status(o)}" if o else ""
+            buttons.append((number, f"№{number}{suffix}"))
+
+        await swap(callback, "📖 <b>Ваші замовлення</b>", orders_kb(buttons))
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("myord:"))
+    async def cb_my_order(callback: CallbackQuery):
+        raw = callback.data.split(":", 1)[1]
+        if not raw.isdigit():
+            await callback.answer()
+            return
+        number = int(raw)
+        # Чуже замовлення не показуємо, навіть якщо хтось підробить callback
+        if db.user_for_order(number) != callback.from_user.id:
+            await callback.answer("Замовлення не знайдено.", show_alert=True)
+            return
+        row = db.row_for_order(number)
+        try:
+            o = await sheets.get_order(row) if row else None
+        except Exception:
+            log.exception("Таблиця недоступна при показі замовлення #%s", number)
+            await callback.answer("Таблиця тимчасово недоступна 🙁", show_alert=True)
+            return
+        if not o:
+            await swap(callback, f"Замовлення №{number} не знайдено.", back_kb("menu:orders"))
+            await callback.answer()
+            return
+        await swap(callback, order_card(number, o), back_kb("menu:orders"))
         await callback.answer()
 
     @router.callback_query(F.data == "promo:order")
@@ -622,7 +726,7 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
 
         try:
             row = await sheets.create_order(order)
-            db.map_order_row(number, row)
+            db.map_order_row(number, row, user.id)
         except Exception:
             log.exception("Google Таблиця недоступна, замовлення #%s йде в офлайн-чергу", number)
             sheets.queue_order(order)
@@ -640,9 +744,9 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
         await swap(callback, "Головне меню. Оберіть дію:", main_kb())
         # Замовлення оформлене — прибираємо велику кнопку «До корзини»
         await callback.message.answer(
-            f"🎉 <b>Вітаємо з покупкою!</b>\n\n"
-            f"Ваше замовлення <b>№{number}</b> прийнято. "
-            "Ми зв'яжемося з вами найближчим часом.",
+            "🎉 <b>Вітаємо з покупкою!</b>\n\n"
+            + order_card(number, order, total=cart_total(cart))
+            + "\n\nМи зв'яжемося з вами найближчим часом.",
             reply_markup=ReplyKeyboardRemove(),
         )
         await callback.answer("Замовлення прийнято!")

@@ -176,6 +176,32 @@ class SheetsService:
             body={"values": [["TRUE" if packed else "FALSE"]]},
         ))
 
+    async def get_order(self, row: int) -> dict | None:
+        """Один рядок замовлення цілком — для картки, яку показуємо клієнту.
+        None, якщо рядок порожній (замовлення видалили руками)."""
+        rng = f"{self._orders_sheet}!A{row}:N{row}"
+        res = await self._run(self._values().get(spreadsheetId=self._spreadsheet_id, range=rng))
+        values = res.get("values", [])
+        if not values:
+            return None
+        cells = values[0] + [""] * (14 - len(values[0]))
+        if not cells[4].strip() and not cells[2].strip():
+            return None
+        return {
+            "packed": cells[0].strip().upper() == "TRUE",
+            "ttn": cells[1].strip(),
+            "items": cells[2],
+            "phone": cells[3],
+            "surname": cells[4],
+            "name": cells[5],
+            "patronymic": cells[6],
+            "delivery_type": cells[7],
+            "address": cells[8],
+            "city": cells[9],
+            "district": cells[10],
+            "region": cells[11],
+        }
+
     async def list_orders(self, limit: int = 10) -> list[dict]:
         """Останні (найновіші — знизу таблиці) рядки з реальними замовленнями."""
         rng = f"{self._orders_sheet}!A{DATA_START_ROW}:L{FIRST_ROW_SCAN_LIMIT}"
@@ -251,8 +277,8 @@ class SheetsService:
         return len(self._load_pending())
 
     async def flush_pending(self) -> list[dict]:
-        """Довантажує чергу в Таблицю. Повертає [{number, row}, ...] для успішних;
-        зупиняється на першій помилці (Sheets ще недоступні)."""
+        """Довантажує чергу в Таблицю. Повертає [{number, row, user_id}, ...] для
+        успішних; зупиняється на першій помилці (Sheets ще недоступні)."""
         pending = self._load_pending()
         flushed = []
         while pending:
@@ -260,7 +286,9 @@ class SheetsService:
                 row = await self.create_order(pending[0])
             except Exception:
                 break
-            flushed.append({"number": pending.pop(0)["number"], "row": row})
+            done = pending.pop(0)
+            # user_id несемо далі: без нього замовлення не потрапить у «Мої замовлення»
+            flushed.append({"number": done["number"], "row": row, "user_id": done.get("user_id")})
             self._save_pending(pending)
         return flushed
 

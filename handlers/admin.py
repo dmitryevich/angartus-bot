@@ -258,7 +258,21 @@ def build_admin_router(cfg: Config, sheets: SheetsService) -> Router:
             log.exception("Помилка Google Таблиці при зміні статусу #%s", number)
             await message.reply("❌ Таблиця недоступна, спробуйте пізніше.")
             return
-        await message.reply(f"✅ Замовлення #{number} → {status}")
+        # Клієнта сповіщаємо, якщо знаємо, чиє це замовлення. Старі записи
+        # (до появи user_id у order_rows) тихо лишаються без сповіщення.
+        notified = ""
+        client_id = db.user_for_order(number)
+        if client_id:
+            try:
+                await message.bot.send_message(
+                    client_id,
+                    f"📦 Ваше замовлення <b>№{number}</b>: <b>{status}</b>",
+                )
+                notified = " · клієнта сповіщено"
+            except Exception:
+                log.warning("Не вдалося сповістити клієнта %s про #%s", client_id, number, exc_info=True)
+                notified = " · клієнту не доставлено"
+        await message.reply(f"✅ Замовлення #{number} → {status}{notified}")
 
     @router.message(Command("orders"))
     async def cmd_orders(message: Message):
