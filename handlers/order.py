@@ -340,6 +340,18 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
             await callback.answer()
             return
         cat_id = next(c.id for c in CATEGORIES if any(p.id == product.id for p in c.products))
+        if not product.available:
+            # Позиція лишається в меню, але замовити її не можна — у стан
+            # Shop.quantity не заходимо, щоб бот не питав кількість.
+            await state.set_state(None)
+            await state.update_data(pending_product=None, screen_cat=cat_id)
+            await swap(
+                callback,
+                "Упс... Цього товару більше немає у наявності",
+                ikb([("🗂 До категорій", "menu:cats")]),
+            )
+            await callback.answer()
+            return
         await state.update_data(
             pending_product=product.id,
             screen_cat=cat_id,

@@ -1,4 +1,8 @@
-"""Каталог товарів. Щоб додати позицію — допишіть словник у потрібну категорію."""
+"""Каталог товарів. Щоб додати позицію — допишіть словник у потрібну категорію.
+
+`available=False` лишає позицію у списку, але не дає її замовити: бот показує
+повідомлення «немає у наявності» замість запиту кількості.
+"""
 from dataclasses import dataclass
 
 
@@ -8,6 +12,7 @@ class Product:
     title: str
     price: int
     description: str
+    available: bool = True
 
 
 @dataclass(frozen=True)
@@ -27,6 +32,19 @@ CATEGORIES: tuple[Category, ...] = (
                 title="Patrimonium: Valkyrie",
                 price=400,
                 description="Журнал серії Patrimonium.",
+            ),
+        ),
+    ),
+    Category(
+        id="merch",
+        title="👕 Мерч",
+        products=(
+            Product(
+                id="pin_patronus",
+                title="Пін «Anghartus Patronus»",
+                price=575,
+                description="Посріблений лімітований пін.\nРозмір: 5.8 см",
+                available=False,
             ),
         ),
     ),
