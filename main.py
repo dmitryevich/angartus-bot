@@ -9,6 +9,7 @@ from aiogram.enums import ParseMode
 import db
 from config import Config, load_config
 from handlers import build_admin_router, build_client_router, build_order_router
+from notion_service import NotionService
 from sheets_service import SheetsService
 
 log = logging.getLogger(__name__)
@@ -25,7 +26,7 @@ async def pending_flush_loop(bot: Bot, cfg: Config, sheets: SheetsService) -> No
             flushed = await sheets.flush_pending()
             if flushed:
                 for item in flushed:
-                    db.map_order_row(item["number"], item["row"], item.get("user_id"))
+                    db.map_order_page(item["number"], item["page_id"], item.get("user_id"))
                 nums = ", ".join(f"#{item['number']}" for item in flushed)
                 await bot.send_message(
                     cfg.admin_group_id,
@@ -43,16 +44,17 @@ async def main() -> None:
     )
     cfg = load_config()
     db.init_db(cfg.db_path)
-    sheets = SheetsService(cfg)
+    sheets = SheetsService(cfg)   # клієнти для розсилки і шаблони відповідей
+    orders = NotionService(cfg)   # самі замовлення
 
     bot = Bot(cfg.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     # Порядок важливий: команди/FSM → адмін-група → всі інші повідомлення клієнтів
-    dp.include_router(build_order_router(cfg, sheets))
-    dp.include_router(build_admin_router(cfg, sheets))
+    dp.include_router(build_order_router(cfg, sheets, orders))
+    dp.include_router(build_admin_router(cfg, sheets, orders))
     dp.include_router(build_client_router(cfg, sheets))
 
-    flush_task = asyncio.create_task(pending_flush_loop(bot, cfg, sheets))
+    flush_task = asyncio.create_task(pending_flush_loop(bot, cfg, orders))
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         log.info("Бот запущено")

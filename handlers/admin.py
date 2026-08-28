@@ -15,7 +15,8 @@ from aiogram.types import (
 
 import db
 from config import Config
-from sheets_service import STATUS_ALIASES, STATUS_PACKED, STATUSES, SheetsService
+from notion_service import STATUS_ALIASES, STATUS_PACKED, STATUSES, NotionService
+from sheets_service import SheetsService
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _reply_user(message: Message) -> int | None:
     return db.user_by_group_message(message.reply_to_message.message_id)
 
 
-def build_admin_router(cfg: Config, sheets: SheetsService) -> Router:
+def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService) -> Router:
     router = Router(name="admin")
     router.message.filter(F.chat.id == cfg.admin_group_id)
 
@@ -248,15 +249,15 @@ def build_admin_router(cfg: Config, sheets: SheetsService) -> Router:
         if not status:
             await message.reply("Невідомий статус.\n" + usage)
             return
-        row = db.row_for_order(number)
-        if row is None:
+        page_id = db.page_for_order(number)
+        if page_id is None:
             await message.reply(f"❌ Замовлення #{number} не знайдено.")
             return
         try:
-            await sheets.set_packed(row, packed=(status == STATUS_PACKED))
+            await orders.set_packed(page_id, packed=(status == STATUS_PACKED))
         except Exception:
-            log.exception("Помилка Google Таблиці при зміні статусу #%s", number)
-            await message.reply("❌ Таблиця недоступна, спробуйте пізніше.")
+            log.exception("Помилка Notion при зміні статусу #%s", number)
+            await message.reply("❌ Notion недоступний, спробуйте пізніше.")
             return
         # Клієнта сповіщаємо, якщо знаємо, чиє це замовлення. Старі записи
         # (до появи user_id у order_rows) тихо лишаються без сповіщення.
@@ -279,19 +280,19 @@ def build_admin_router(cfg: Config, sheets: SheetsService) -> Router:
         if not _allowed_here(message):
             return
         try:
-            orders = await sheets.list_orders(200)
+            # list_orders уже віддає лише незапаковані, найновіші спершу
+            pending = (await orders.list_orders(100))[:10]
         except Exception:
-            log.exception("Помилка Google Таблиці при запиті замовлень")
-            await message.reply("❌ Таблиця недоступна, спробуйте пізніше.")
+            log.exception("Помилка Notion при запиті замовлень")
+            await message.reply("❌ Notion недоступний, спробуйте пізніше.")
             return
-        orders = [o for o in orders if not o["packed"]][:10]
-        if not orders:
+        if not pending:
             await message.reply("Немає незапакованих замовлень 🎉")
             return
         lines = ["🟡 <b>Незапаковані замовлення (останні 10):</b>"]
-        for o in orders:
-            number = db.order_for_row(o["row"])
-            label = f"#{number}" if number is not None else f"рядок {o['row']}"
+        for o in pending:
+            number = db.order_for_page(o["page_id"])
+            label = f"#{number}" if number is not None else "без номера"
             items = o["items"] if len(o["items"]) <= 60 else o["items"][:60] + "…"
             lines.append(
                 f"• <b>{label} {html.escape(o['fio'])}</b> — "

@@ -1,13 +1,15 @@
-"""Магазин: каталог → кошик → оплата з фото квитанції → дані клієнта → Google Таблиця.
+"""Магазин: каталог → кошик → оплата з фото квитанції → дані клієнта → Notion.
 
 Уся навігація — inline-кнопки під текстом повідомлення. Нижня панель (ReplyKeyboard)
 не використовується взагалі, тому кнопки ніколи не «зависають» від попереднього кроку.
 Перехід між екранами редагує те саме повідомлення, тож чат не засмічується.
 """
 import html
+import io
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -26,7 +28,8 @@ from aiogram.types import (
 import db
 from catalog import CATEGORIES, CATEGORY_BY_ID, PRODUCT_BY_ID
 from config import Config
-from sheets_service import DELIVERY_TYPES, SheetsService
+from notion_service import DELIVERY_TYPES, NotionService
+from sheets_service import SheetsService
 
 log = logging.getLogger(__name__)
 
@@ -178,7 +181,7 @@ def cart_text(cart: dict) -> str:
 
 
 def cart_plain(cart: dict) -> str:
-    """Рядок для колонки «Склад замовлення» в Таблиці."""
+    """Рядок для властивості «Склад замовлення» в Notion."""
     parts = []
     for pid, qty in cart.items():
         product = PRODUCT_BY_ID.get(pid)
@@ -188,7 +191,7 @@ def cart_plain(cart: dict) -> str:
 
 
 def order_status(o: dict) -> str:
-    """Статус словами. Свіже замовлення ще не має рядка в Таблиці — тоді «Прийнято»."""
+    """Статус словами. Свіже замовлення ще не прочитане з Notion — тоді «Прийнято»."""
     if "packed" not in o:
         return "✅ Прийнято"
     if o.get("ttn"):
@@ -254,7 +257,7 @@ async def swap(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup)
         await callback.message.answer(text, reply_markup=markup)
 
 
-def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
+def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService) -> Router:
     router = Router(name="order")
     router.message.filter(F.chat.type == "private")
 
@@ -379,9 +382,9 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
             return
 
         buttons: list[tuple[int, str]] = []
-        for number, row in pairs:
+        for number, page_id in pairs:
             try:
-                o = await sheets.get_order(row)
+                o = await orders.get_order(page_id)
             except Exception:
                 log.warning("Таблиця недоступна при читанні замовлення #%s", number, exc_info=True)
                 o = None
@@ -403,9 +406,9 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
         if db.user_for_order(number) != callback.from_user.id:
             await callback.answer("Замовлення не знайдено.", show_alert=True)
             return
-        row = db.row_for_order(number)
+        page_id = db.page_for_order(number)
         try:
-            o = await sheets.get_order(row) if row else None
+            o = await orders.get_order(page_id) if page_id else None
         except Exception:
             log.exception("Таблиця недоступна при показі замовлення #%s", number)
             await callback.answer("Таблиця тимчасово недоступна 🙁", show_alert=True)
@@ -724,16 +727,35 @@ def build_order_router(cfg: Config, sheets: SheetsService) -> Router:
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        # Квитанцію кладемо в Notion справжнім файлом, а не посиланням, щоб у
+        # властивості «Фото чека» було видно сам скрін. Якщо не вийде —
+        # замовлення все одно створюємо, у групі квитанція вже є.
+        if data.get("receipt_file_id"):
+            try:
+                buf = io.BytesIO()
+                tg_file = await bot.get_file(data["receipt_file_id"])
+                await bot.download_file(tg_file.file_path, buf)
+                ext = Path(tg_file.file_path).suffix.lower() or ".jpg"
+                mime = "application/pdf" if ext == ".pdf" else f"image/{ext.lstrip('.').replace('jpg', 'jpeg')}"
+                upload_id = await orders.upload_receipt(
+                    buf.getvalue(), f"чек-{number}{ext}", mime
+                )
+                if upload_id:
+                    order["receipt_upload_id"] = upload_id
+                    order["receipt_name"] = f"чек-{number}{ext}"
+            except Exception:
+                log.warning("Не вдалося підготувати квитанцію для #%s", number, exc_info=True)
+
         try:
-            row = await sheets.create_order(order)
-            db.map_order_row(number, row, user.id)
+            page_id = await orders.create_order(order)
+            db.map_order_page(number, page_id, user.id)
         except Exception:
-            log.exception("Google Таблиця недоступна, замовлення #%s йде в офлайн-чергу", number)
-            sheets.queue_order(order)
+            log.exception("Notion недоступний, замовлення #%s йде в офлайн-чергу", number)
+            orders.queue_order(order)
             try:
                 await bot.send_message(
                     cfg.admin_group_id,
-                    f"⚠️ Замовлення #{number}: Google Таблиця недоступна — "
+                    f"⚠️ Замовлення #{number}: Notion недоступний — "
                     "збережено локально, буде довантажено автоматично.",
                     message_thread_id=cfg.bot_topic_id,
                 )

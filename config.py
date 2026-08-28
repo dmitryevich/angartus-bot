@@ -10,6 +10,8 @@ load_dotenv()
 class Config:
     bot_token: str
     admin_group_id: int
+    notion_token: str
+    notion_orders_ds_id: str
     google_sheets_id: str
     google_service_account_json: str
     orders_sheet_name: str
@@ -27,6 +29,8 @@ def load_config() -> Config:
     return Config(
         bot_token=os.environ["BOT_TOKEN"],
         admin_group_id=int(os.environ["ADMIN_GROUP_ID"]),
+        notion_token=os.environ["NOTION_TOKEN"],
+        notion_orders_ds_id=os.environ["NOTION_ORDERS_DS_ID"],
         google_sheets_id=os.environ["GOOGLE_SHEETS_ID"],
         google_service_account_json=os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"],
         orders_sheet_name=os.getenv("ORDERS_SHEET_NAME", "Предзамовлення"),
