@@ -4,13 +4,13 @@
 - основна властивість (title) — «Телефон», а не номер ТТН;
 - «Номер ТТН» бот не заповнює: його проставляють при створенні накладної;
 - статус замовлення — чекбокс «Запаковано», окремого поля «Статус» немає;
-- № замовлення і user_id у Notion не зберігаються, зв'язка живе в SQLite.
+- клієнту замовлення показується як «дд.мм.рр гг:хв» і лягає у властивість
+  «Номер замовлення»; внутрішній номер (#100+) і user_id живуть у SQLite.
 
 Квитанція клієнта вантажиться у властивість «Фото чека» як справжній файл
 Notion (File Upload API), а не посиланням — інакше в базі не видно, що саме
 надіслала людина.
 """
-import asyncio
 import json
 import logging
 from pathlib import Path
@@ -117,6 +117,7 @@ class NotionService:
     def order_properties(o: dict) -> dict:
         delivery = o.get("delivery_type") or ""
         props = {
+            "Номер замовлення": _rt(o.get("label") or ""),
             "Телефон": _title(o.get("phone") or ""),
             "Прізвище": _rt(o.get("surname") or ""),
             "Ім'я": _rt(o.get("name") or ""),
@@ -173,6 +174,7 @@ class NotionService:
         p = page.get("properties", {})
         delivery = (p.get("Тип отримання", {}).get("select") or {}).get("name", "")
         return {
+            "label": _plain(p.get("Номер замовлення")),
             "packed": bool(p.get("Запаковано", {}).get("checkbox")),
             "ttn": _plain(p.get("Номер ТТН")),
             "items": _plain(p.get("Склад замовлення")),

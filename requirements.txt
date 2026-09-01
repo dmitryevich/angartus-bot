@@ -3,3 +3,5 @@ google-api-python-client>=2.100
 google-auth>=2.30
 python-dotenv>=1.0
 httpx>=0.27
+# київський час для номера замовлення на голому Linux-образі
+tzdata>=2024.1

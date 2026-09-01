@@ -21,7 +21,7 @@ def build_client_router(cfg: Config, sheets: SheetsService) -> Router:
     @router.message()
     async def on_client_message(message: Message, bot: Bot):
         if message.text and message.text.startswith("/"):
-            await message.answer("Невідома команда 🤔 /order — оформити замовлення.")
+            await message.answer("Невідома команда 🤔 /start — каталог і замовлення.")
             return
 
         user = message.from_user

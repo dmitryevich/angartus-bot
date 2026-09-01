@@ -325,7 +325,8 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
             try:
                 await message.bot.send_message(
                     client_id,
-                    f"📦 Ваше замовлення <b>№{number}</b>: <b>{status}</b>",
+                    "📦 Ваше замовлення "
+                    f"<b>{db.label_for_order(number) or f'№{number}'}</b>: <b>{status}</b>",
                 )
                 notified = " · клієнта сповіщено"
             except Exception:

@@ -8,7 +8,8 @@ import html
 import io
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 
 from aiogram import Bot, F, Router
@@ -34,6 +35,23 @@ from sheets_service import SheetsService
 log = logging.getLogger(__name__)
 
 PHONE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
+
+# Номер замовлення для клієнта — час його оформлення. Контейнер Railway живе в
+# UTC, тому час беремо київський: інакше в номері буде «мінус три години».
+try:
+    KYIV = ZoneInfo("Europe/Kyiv")
+except ZoneInfoNotFoundError:  # образ без бази часових поясів (tzdata)
+    KYIV = timezone(timedelta(hours=3))
+    log.warning("Немає бази часових поясів — час замовлення рахуємо як UTC+3")
+ORDER_LABEL_FMT = "%d.%m.%y %H:%M"
+
+# Хто зараз оформлює замовлення. Обробник іде кілька секунд (Telegram, чек,
+# Notion), і другий тап по «Підтвердити» встигає створити дубль.
+_confirming: set[int] = set()
+
+
+def order_label(moment: datetime | None = None) -> str:
+    return (moment or datetime.now(KYIV)).astimezone(KYIV).strftime(ORDER_LABEL_FMT)
 
 BACK = "« Повернення"
 BTN_CHECKOUT = "🛒 До корзини"
@@ -225,14 +243,15 @@ def order_status(o: dict) -> str:
 
 
 def order_card(number: int, o: dict, total: int | None = None) -> str:
-    """Картка замовлення — і одразу після оформлення, і в «Моїх замовленнях»."""
+    """Картка замовлення — і одразу після оформлення, і в «Моїх замовленнях».
+    Клієнту показуємо не внутрішній #номер, а час оформлення."""
     fio = " ".join(
         p for p in (o.get("surname"), o.get("name"), o.get("patronymic")) if p
     ).strip()
     place = ", ".join(p for p in (o.get("region"), o.get("district"), o.get("city")) if p)
 
     lines = [
-        f"🧾 <b>Замовлення №{number}</b>",
+        f"🧾 <b>Замовлення {o.get('label') or f'№{number}'}</b>",
         f"Статус: <b>{order_status(o)}</b>",
     ]
     if o.get("ttn"):
@@ -407,15 +426,17 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             return
 
         buttons: list[tuple[int, str]] = []
-        for number, page_id in pairs:
+        for number, page_id, label in pairs:
             try:
                 o = await orders.get_order(page_id)
             except Exception:
-                log.warning("Таблиця недоступна при читанні замовлення #%s", number, exc_info=True)
+                log.warning("Notion недоступний при читанні замовлення #%s", number, exc_info=True)
                 o = None
-            # Підпис кнопки — номер і статус, щоб не тицяти навмання
+            # Підпис кнопки — видимий номер (час оформлення) і статус, щоб не
+            # тицяти навмання. Замовлення до появи label лишаються з «№».
+            title = label or (o or {}).get("label") or f"№{number}"
             suffix = f" — {order_status(o)}" if o else ""
-            buttons.append((number, f"№{number}{suffix}"))
+            buttons.append((number, f"{title}{suffix}"))
 
         await swap(callback, "📖 <b>Ваші замовлення</b>", orders_kb(buttons))
         await callback.answer()
@@ -691,18 +712,31 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
 
     @router.callback_query(F.data == "order:confirm")
     async def cb_confirm(callback: CallbackQuery, state: FSMContext, bot: Bot):
+        user = callback.from_user
+        # Перевірка й позначка — без await між ними, інакше два тапи проскочать
+        # обидва і в базі буде два однакових замовлення
+        if user.id in _confirming:
+            await callback.answer("Замовлення вже оформлюється, зачекайте…", show_alert=True)
+            return
+        _confirming.add(user.id)
+        try:
+            await _confirm(callback, state, bot, user)
+        finally:
+            _confirming.discard(user.id)
+
+    async def _confirm(callback: CallbackQuery, state: FSMContext, bot: Bot, user) -> None:
         data = await state.get_data()
         cart = cart_items(data)
         if not cart:
             await swap(callback, "🧾 Корзина порожня. Оберіть дію:", main_kb())
             await callback.answer()
             return
-        user = callback.from_user
         number = db.next_order_number()
+        label = order_label()
         summary = review_text(data).replace("Все вірно?", "").strip()
         who = f"@{user.username}" if user.username else user.full_name
         admin_text = (
-            f"🆕 <b>Замовлення #{number}</b> від {html.escape(who)}\n{summary}"
+            f"🆕 <b>Замовлення {label}</b> (#{number}) від {html.escape(who)}\n{summary}"
             "\n\n💬 Reply на це повідомлення — відповідь піде клієнту."
         )
 
@@ -721,7 +755,7 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             common = {
                 "chat_id": cfg.admin_group_id,
                 "message_thread_id": cfg.bot_topic_id,
-                "caption": admin_text if fits else f"🆕 <b>Замовлення #{number}</b>",
+                "caption": admin_text if fits else f"🆕 <b>Замовлення {label}</b> (#{number})",
             }
             if kind == "photo":
                 sent = await bot.send_photo(photo=file_id, **common)
@@ -747,6 +781,7 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
 
         order = {
             "number": number,
+            "label": label,
             "user_id": user.id,
             "username": f"@{user.username}" if user.username else None,
             "surname": data.get("surname", ""),
@@ -784,14 +819,14 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
 
         try:
             page_id = await orders.create_order(order)
-            db.map_order_page(number, page_id, user.id)
+            db.map_order_page(number, page_id, user.id, label)
         except Exception:
             log.exception("Notion недоступний, замовлення #%s йде в офлайн-чергу", number)
             orders.queue_order(order)
             try:
                 await bot.send_message(
                     cfg.admin_group_id,
-                    f"⚠️ Замовлення #{number}: Notion недоступний — "
+                    f"⚠️ Замовлення {label} (#{number}): Notion недоступний — "
                     "збережено локально, буде довантажено автоматично.",
                     message_thread_id=cfg.bot_topic_id,
                 )

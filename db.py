@@ -44,7 +44,8 @@ def init_db(path: str) -> None:
             order_number INTEGER PRIMARY KEY,
             sheet_row    INTEGER,
             user_id      INTEGER,
-            page_id      TEXT
+            page_id      TEXT,
+            label        TEXT
         )
         """
     )
@@ -54,6 +55,8 @@ def init_db(path: str) -> None:
         _conn.execute("ALTER TABLE order_rows ADD COLUMN user_id INTEGER")
     if "page_id" not in columns:
         _conn.execute("ALTER TABLE order_rows ADD COLUMN page_id TEXT")
+    if "label" not in columns:
+        _conn.execute("ALTER TABLE order_rows ADD COLUMN label TEXT")
     _conn.execute("CREATE INDEX IF NOT EXISTS idx_order_rows_user ON order_rows(user_id)")
     # Залишки товарів. Рядка немає — облік по цій позиції не ведеться, тобто
     # обмежень на замовлення немає. 0 — товар показується як «немає в наявності».
@@ -162,13 +165,17 @@ def set_paused(user_id: int, paused: bool) -> None:
         _conn.commit()
 
 
-def map_order_page(order_number: int, page_id: str, user_id: int | None = None) -> None:
-    """Зв'язка «№ замовлення -> сторінка Notion + клієнт». Ані номера, ані
-    user_id у Notion немає, тому це єдине місце, де вони тримаються разом."""
+def map_order_page(
+    order_number: int, page_id: str, user_id: int | None = None, label: str | None = None
+) -> None:
+    """Зв'язка «№ замовлення -> сторінка Notion + клієнт + видимий номер».
+    Внутрішнього номера і user_id у Notion немає, тому це єдине місце, де вони
+    тримаються разом. label — те, що бачить клієнт: «дд.мм.рр гг:хв»."""
     with _lock:
         _conn.execute(
-            "INSERT OR REPLACE INTO order_rows (order_number, page_id, user_id) VALUES (?, ?, ?)",
-            (order_number, page_id, user_id),
+            "INSERT OR REPLACE INTO order_rows (order_number, page_id, user_id, label) "
+            "VALUES (?, ?, ?, ?)",
+            (order_number, page_id, user_id, label),
         )
         _conn.commit()
 
@@ -177,6 +184,14 @@ def user_for_order(order_number: int) -> int | None:
     """Кому належить замовлення. None для старих записів без user_id."""
     row = _conn.execute(
         "SELECT user_id FROM order_rows WHERE order_number = ?", (order_number,)
+    ).fetchone()
+    return row[0] if row and row[0] else None
+
+
+def label_for_order(order_number: int) -> str | None:
+    """Видимий номер замовлення («дд.мм.рр гг:хв») — те, що знає клієнт."""
+    row = _conn.execute(
+        "SELECT label FROM order_rows WHERE order_number = ?", (order_number,)
     ).fetchone()
     return row[0] if row and row[0] else None
 
@@ -195,14 +210,14 @@ def order_for_page(page_id: str) -> int | None:
     return row[0] if row else None
 
 
-def orders_for_user(user_id: int, limit: int = 10) -> list[tuple[int, str]]:
-    """[(номер замовлення, сторінка Notion), ...] — найновіші спершу.
+def orders_for_user(user_id: int, limit: int = 10) -> list[tuple[int, str, str | None]]:
+    """[(номер, сторінка Notion, видимий номер), ...] — найновіші спершу.
     Замовлення епохи Google Таблиці (без page_id) сюди не потрапляють:
     показати їх картку все одно нема звідки."""
     return [
-        (r[0], r[1])
+        (r[0], r[1], r[2])
         for r in _conn.execute(
-            "SELECT order_number, page_id FROM order_rows "
+            "SELECT order_number, page_id, label FROM order_rows "
             "WHERE user_id = ? AND page_id IS NOT NULL "
             "ORDER BY order_number DESC LIMIT ?",
             (user_id, limit),
