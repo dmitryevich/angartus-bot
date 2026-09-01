@@ -32,11 +32,9 @@ ADMIN_COMMANDS = [
     BotCommand(command="orders", description="Незапаковані замовлення (останні 10)"),
     BotCommand(command="status", description="Статус замовлення: /status <номер> запаковано"),
     BotCommand(command="mailings", description="Розсилка: reply + /mailings «товар»|«івент»"),
-    BotCommand(command="pause", description="Reply на клієнта — вимкнути авто-відповіді"),
-    BotCommand(command="resume", description="Reply на клієнта — увімкнути назад"),
-    BotCommand(command="topicid", description="Показати ID цієї теми"),
-    BotCommand(command="importclients", description="Разовий імпорт клієнтів у Таблицю"),
 ]
+# /pause, /resume, /topicid, /importclients у підказки не виносимо: перші дві
+# потрібні зрідка, решта — разові налаштування. Самі команди працюють.
 
 
 async def setup_commands(bot: Bot, cfg: Config) -> None:
