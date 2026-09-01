@@ -46,6 +46,15 @@ CATEGORIES: tuple[Category, ...] = (
                 description="Посріблений лімітований пін.\nРозмір: 5.8 см",
                 available=False,
             ),
+            Product(
+                id="pin_calvaria",
+                title="Пін «Calvaria Anghata»",
+                price=450,
+                description=(
+                    "Палаючий череп — символ палкої вірності ідеалу Ангарти.\n"
+                    "Підійде для носіння на сумці, рюкзаці та одязі."
+                ),
+            ),
         ),
     ),
 )
