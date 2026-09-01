@@ -2,6 +2,7 @@
 лічильник замовлень, залишки товарів."""
 import sqlite3
 import threading
+import time
 
 _conn: sqlite3.Connection | None = None
 _lock = threading.Lock()
@@ -61,6 +62,20 @@ def init_db(path: str) -> None:
         CREATE TABLE IF NOT EXISTS stock (
             product_id TEXT PRIMARY KEY,
             qty        INTEGER NOT NULL
+        )
+        """
+    )
+    # Хто саме зараз задає залишок. У пам'яті це тримати не можна: деплой
+    # Railway перезапускає процес, і адмін лишається з мовчазним ботом.
+    _conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock_prompt (
+            chat_id    INTEGER NOT NULL,
+            user_id    INTEGER NOT NULL,
+            product_id TEXT    NOT NULL,
+            msg_id     INTEGER NOT NULL,
+            asked_at   REAL    NOT NULL,
+            PRIMARY KEY (chat_id, user_id)
         )
         """
     )
@@ -223,3 +238,37 @@ def take_stock(product_id: str, qty: int) -> int | None:
         _conn.execute("UPDATE stock SET qty = ? WHERE product_id = ?", (left, product_id))
         _conn.commit()
         return left
+
+
+# Скільки живе запит «скільки лишилось»: за пів години число в темі вже
+# майже напевно не про залишки
+STOCK_PROMPT_TTL = 30 * 60
+
+
+def set_stock_prompt(chat_id: int, user_id: int, product_id: str, msg_id: int) -> None:
+    with _lock:
+        _conn.execute(
+            "INSERT OR REPLACE INTO stock_prompt "
+            "(chat_id, user_id, product_id, msg_id, asked_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, user_id, product_id, msg_id, time.time()),
+        )
+        _conn.commit()
+
+
+def get_stock_prompt(chat_id: int, user_id: int) -> tuple[str, int] | None:
+    """(product_id, msg_id) або None, якщо запиту немає чи він протух."""
+    row = _conn.execute(
+        "SELECT product_id, msg_id, asked_at FROM stock_prompt WHERE chat_id = ? AND user_id = ?",
+        (chat_id, user_id),
+    ).fetchone()
+    if not row or time.time() - row[2] > STOCK_PROMPT_TTL:
+        return None
+    return row[0], row[1]
+
+
+def clear_stock_prompt(chat_id: int, user_id: int) -> None:
+    with _lock:
+        _conn.execute(
+            "DELETE FROM stock_prompt WHERE chat_id = ? AND user_id = ?", (chat_id, user_id)
+        )
+        _conn.commit()

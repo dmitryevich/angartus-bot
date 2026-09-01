@@ -6,8 +6,6 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -29,10 +27,6 @@ SEND_PAUSE = 0.06  # пауза між надсиланнями, щоб не в�
 
 # Слово в лапках після /mailings → чи додавати кнопку «Замовити»
 MAILING_MODES = {"товар": True, "івент": False}
-
-
-class Stock(StatesGroup):
-    quantity = State()
 
 
 def _left_label(product) -> str:
@@ -76,11 +70,22 @@ def stock_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def real_reply(message: Message):
+    """Справжня відповідь, а не артефакт форуму. У темах Telegram підставляє
+    reply_to_message = службове повідомлення самої теми (його id збігається з
+    message_thread_id), тож просто «є reply» ще нічого не означає."""
+    reply = message.reply_to_message
+    if reply is None or reply.message_id == message.message_thread_id:
+        return None
+    return reply
+
+
 def _reply_user(message: Message) -> int | None:
     """Клієнт, якому належить повідомлення, на яке зроблено reply."""
-    if not message.reply_to_message:
+    reply = real_reply(message)
+    if not reply:
         return None
-    return db.user_by_group_message(message.reply_to_message.message_id)
+    return db.user_by_group_message(reply.message_id)
 
 
 def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService) -> Router:
@@ -147,7 +152,9 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
             return
         with_button = MAILING_MODES[mode]
 
-        src = message.reply_to_message
+        # real_reply, а не message.reply_to_message: у темі forum-псевдореплай
+        # підсунув би службове повідомлення теми замість справжнього допису
+        src = real_reply(message)
         if not src:
             await message.reply(usage)
             return
@@ -355,20 +362,19 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
     # ---------- залишки товарів ----------
 
     @router.message(Command("remnants"))
-    async def cmd_remnants(message: Message, state: FSMContext):
+    async def cmd_remnants(message: Message):
         """Список товарів із залишками. Кнопка на товарі → запит нової кількості."""
         if not _allowed_here(message):
             return
-        await state.set_state(None)
-        sent = await message.reply(stock_text(), reply_markup=stock_kb())
-        await state.update_data(stock_msg_id=sent.message_id, stock_product=None)
+        db.clear_stock_prompt(message.chat.id, message.from_user.id)
+        await message.reply(stock_text(), reply_markup=stock_kb())
 
     @router.callback_query(F.data.startswith("stock:"))
-    async def cb_stock(callback: CallbackQuery, state: FSMContext):
+    async def cb_stock(callback: CallbackQuery):
         target = callback.data.split(":", 1)[1]
+        chat_id = callback.message.chat.id
         if target == "list":
-            await state.set_state(None)
-            await state.update_data(stock_product=None)
+            db.clear_stock_prompt(chat_id, callback.from_user.id)
             await callback.message.edit_text(stock_text(), reply_markup=stock_kb())
             await callback.answer()
             return
@@ -376,12 +382,14 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
         if not product:
             await callback.answer("Товар не знайдено.", show_alert=True)
             return
-        await state.update_data(stock_product=product.id, stock_msg_id=callback.message.message_id)
-        await state.set_state(Stock.quantity)
+        # Запит живе в SQLite, а не в пам'яті процесу: інакше деплой Railway
+        # посеред діалогу лишає адміна з мовчазним ботом
+        db.set_stock_prompt(chat_id, callback.from_user.id, product.id, callback.message.message_id)
         await callback.message.edit_text(
             f"📦 <b>{html.escape(product.title)}</b>"
             f"\nЗараз: <b>{_left_label(product)}</b>"
-            "\n\n🔢 Скільки одиниць лишилось? Напишіть число."
+            "\n\n🔢 Скільки одиниць лишилось? Напишіть число"
+            " — окремим повідомленням або reply на це."
             "\n0 — товар зникне з продажу («немає у наявності»).",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -391,34 +399,33 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
         )
         await callback.answer()
 
-    # ~F.reply_to_message: reply адміна клієнту має йти клієнту, а не в залишки
-    @router.message(Stock.quantity, F.text, ~F.reply_to_message)
-    async def stock_quantity(message: Message, state: FSMContext, bot: Bot):
-        data = await state.get_data()
-        product = PRODUCT_BY_ID.get(data.get("stock_product"))
-        raw = message.text.strip()
-        await state.set_state(None)
-        await state.update_data(stock_product=None)
-        if not raw.isdigit() or not product:
-            # Будь-що, крім числа, — вихід із режиму, щоб бот не ловив
-            # випадкові цифри з розмови в темі
-            await message.reply("Це не число — зміну залишку скасовано. /remnants — почати знову.")
-            return
-        qty = int(raw)
+    def is_stock_answer(message: Message) -> bool:
+        """Число від того, кого бот питав про залишок. Reply приймаємо лише на
+        сам запит — інакше «20» у відповідь клієнту пішло б у залишки."""
+        prompt = db.get_stock_prompt(message.chat.id, message.from_user.id)
+        if not prompt:
+            return False
+        reply = real_reply(message)
+        return reply is None or reply.message_id == prompt[1]
+
+    @router.message(F.text.regexp(r"^\d+$"), is_stock_answer)
+    async def stock_quantity(message: Message, bot: Bot):
+        product_id, msg_id = db.get_stock_prompt(message.chat.id, message.from_user.id)
+        product = PRODUCT_BY_ID[product_id]
+        qty = int(message.text.strip())
         db.set_stock(product.id, qty)
+        db.clear_stock_prompt(message.chat.id, message.from_user.id)
 
         # Список перемальовуємо в тому самому повідомленні, щоб тема не засмічувалась
-        msg_id = data.get("stock_msg_id")
-        if msg_id:
-            try:
-                await bot.edit_message_text(
-                    stock_text(),
-                    chat_id=message.chat.id,
-                    message_id=msg_id,
-                    reply_markup=stock_kb(),
-                )
-            except Exception:
-                log.debug("Не вдалося оновити список залишків", exc_info=True)
+        try:
+            await bot.edit_message_text(
+                stock_text(),
+                chat_id=message.chat.id,
+                message_id=msg_id,
+                reply_markup=stock_kb(),
+            )
+        except Exception:
+            log.debug("Не вдалося оновити список залишків", exc_info=True)
 
         note = f"✅ <b>{html.escape(product.title)}</b> — залишок: <b>{qty} шт</b>"
         if qty == 0:
