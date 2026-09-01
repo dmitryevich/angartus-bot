@@ -6,7 +6,10 @@ import logging
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
@@ -14,6 +17,7 @@ from aiogram.types import (
 )
 
 import db
+from catalog import CATEGORIES, PRODUCT_BY_ID
 from config import Config
 from notion_service import STATUS_ALIASES, STATUS_PACKED, STATUSES, NotionService
 from sheets_service import SheetsService
@@ -27,6 +31,51 @@ SEND_PAUSE = 0.06  # пауза між надсиланнями, щоб не в�
 MAILING_MODES = {"товар": True, "івент": False}
 
 
+class Stock(StatesGroup):
+    quantity = State()
+
+
+def _left_label(product) -> str:
+    """Залишок словами. None — кількість ще не задавали, обмежень немає."""
+    left = db.get_stock(product.id)
+    if not product.available:
+        return "вимкнено в каталозі"
+    if left is None:
+        return "не задано"
+    if left == 0:
+        return "0 — немає в наявності"
+    return f"{left} шт"
+
+
+def stock_text() -> str:
+    lines = ["📦 <b>Залишки товарів</b>"]
+    for category in CATEGORIES:
+        lines.append("\n<b>" + html.escape(category.title) + "</b>")
+        for product in category.products:
+            lines.append(
+                f"• {html.escape(product.title)} — <b>{_left_label(product)}</b>"
+            )
+    lines.append("\nНатисніть на товар, щоб вказати, скільки лишилось.")
+    return "\n".join(lines)
+
+
+def stock_kb() -> InlineKeyboardMarkup:
+    """По кнопці на товар: у підписі — поточний залишок, щоб не тицяти навмання."""
+    rows = []
+    for category in CATEGORIES:
+        for product in category.products:
+            left = db.get_stock(product.id)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{product.title}: {'—' if left is None else left}",
+                        callback_data=f"stock:{product.id}",
+                    )
+                ]
+            )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _reply_user(message: Message) -> int | None:
     """Клієнт, якому належить повідомлення, на яке зроблено reply."""
     if not message.reply_to_message:
@@ -37,6 +86,8 @@ def _reply_user(message: Message) -> int | None:
 def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService) -> Router:
     router = Router(name="admin")
     router.message.filter(F.chat.id == cfg.admin_group_id)
+    # Кнопки залишків живуть тільки в адмін-групі — з приватних чатів їх не смикнути
+    router.callback_query.filter(F.message.chat.id == cfg.admin_group_id)
 
     def _allowed_here(message: Message) -> bool:
         """Якщо задано BOT_TOPIC_ID — команди працюють лише в темі «Замовлення»."""
@@ -300,6 +351,84 @@ def build_admin_router(cfg: Config, sheets: SheetsService, orders: NotionService
             )
         lines.append("\nЗмінити статус: <code>/status &lt;номер&gt; &lt;статус&gt;</code>")
         await message.reply("\n".join(lines))
+
+    # ---------- залишки товарів ----------
+
+    @router.message(Command("remnants"))
+    async def cmd_remnants(message: Message, state: FSMContext):
+        """Список товарів із залишками. Кнопка на товарі → запит нової кількості."""
+        if not _allowed_here(message):
+            return
+        await state.set_state(None)
+        sent = await message.reply(stock_text(), reply_markup=stock_kb())
+        await state.update_data(stock_msg_id=sent.message_id, stock_product=None)
+
+    @router.callback_query(F.data.startswith("stock:"))
+    async def cb_stock(callback: CallbackQuery, state: FSMContext):
+        target = callback.data.split(":", 1)[1]
+        if target == "list":
+            await state.set_state(None)
+            await state.update_data(stock_product=None)
+            await callback.message.edit_text(stock_text(), reply_markup=stock_kb())
+            await callback.answer()
+            return
+        product = PRODUCT_BY_ID.get(target)
+        if not product:
+            await callback.answer("Товар не знайдено.", show_alert=True)
+            return
+        await state.update_data(stock_product=product.id, stock_msg_id=callback.message.message_id)
+        await state.set_state(Stock.quantity)
+        await callback.message.edit_text(
+            f"📦 <b>{html.escape(product.title)}</b>"
+            f"\nЗараз: <b>{_left_label(product)}</b>"
+            "\n\n🔢 Скільки одиниць лишилось? Напишіть число."
+            "\n0 — товар зникне з продажу («немає у наявності»).",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="« Повернення", callback_data="stock:list")]
+                ]
+            ),
+        )
+        await callback.answer()
+
+    # ~F.reply_to_message: reply адміна клієнту має йти клієнту, а не в залишки
+    @router.message(Stock.quantity, F.text, ~F.reply_to_message)
+    async def stock_quantity(message: Message, state: FSMContext, bot: Bot):
+        data = await state.get_data()
+        product = PRODUCT_BY_ID.get(data.get("stock_product"))
+        raw = message.text.strip()
+        await state.set_state(None)
+        await state.update_data(stock_product=None)
+        if not raw.isdigit() or not product:
+            # Будь-що, крім числа, — вихід із режиму, щоб бот не ловив
+            # випадкові цифри з розмови в темі
+            await message.reply("Це не число — зміну залишку скасовано. /remnants — почати знову.")
+            return
+        qty = int(raw)
+        db.set_stock(product.id, qty)
+
+        # Список перемальовуємо в тому самому повідомленні, щоб тема не засмічувалась
+        msg_id = data.get("stock_msg_id")
+        if msg_id:
+            try:
+                await bot.edit_message_text(
+                    stock_text(),
+                    chat_id=message.chat.id,
+                    message_id=msg_id,
+                    reply_markup=stock_kb(),
+                )
+            except Exception:
+                log.debug("Не вдалося оновити список залишків", exc_info=True)
+
+        note = f"✅ <b>{html.escape(product.title)}</b> — залишок: <b>{qty} шт</b>"
+        if qty == 0:
+            note += "\n🚫 У каталозі показується як «немає у наявності»."
+        if not product.available:
+            note += (
+                "\n⚠️ Цей товар вимкнено в каталозі (available=False) — "
+                "клієнти його не замовлять, хоч би який був залишок."
+            )
+        await message.reply(note)
 
     @router.message(F.reply_to_message)
     async def relay_to_client(message: Message, bot: Bot):

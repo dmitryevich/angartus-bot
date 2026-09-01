@@ -1,5 +1,5 @@
 """SQLite-сховище: зв'язка повідомлень у групі з клієнтами, пауза авто-відповідей,
-лічильник замовлень."""
+лічильник замовлень, залишки товарів."""
 import sqlite3
 import threading
 
@@ -54,6 +54,16 @@ def init_db(path: str) -> None:
     if "page_id" not in columns:
         _conn.execute("ALTER TABLE order_rows ADD COLUMN page_id TEXT")
     _conn.execute("CREATE INDEX IF NOT EXISTS idx_order_rows_user ON order_rows(user_id)")
+    # Залишки товарів. Рядка немає — облік по цій позиції не ведеться, тобто
+    # обмежень на замовлення немає. 0 — товар показується як «немає в наявності».
+    _conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS stock (
+            product_id TEXT PRIMARY KEY,
+            qty        INTEGER NOT NULL
+        )
+        """
+    )
     _conn.commit()
 
 
@@ -183,3 +193,33 @@ def orders_for_user(user_id: int, limit: int = 10) -> list[tuple[int, str]]:
             (user_id, limit),
         )
     ]
+
+
+def get_stock(product_id: str) -> int | None:
+    """Скільки лишилось. None — облік по цьому товару не ведеться."""
+    row = _conn.execute("SELECT qty FROM stock WHERE product_id = ?", (product_id,)).fetchone()
+    return row[0] if row else None
+
+
+def set_stock(product_id: str, qty: int) -> None:
+    with _lock:
+        _conn.execute(
+            "INSERT OR REPLACE INTO stock (product_id, qty) VALUES (?, ?)",
+            (product_id, max(qty, 0)),
+        )
+        _conn.commit()
+
+
+def take_stock(product_id: str, qty: int) -> int | None:
+    """Списати продане. Повертає залишок, або None, якщо облік не ведеться.
+    Нижче нуля не опускаємось: два клієнти можуть встигнути купити останнє."""
+    with _lock:
+        row = _conn.execute(
+            "SELECT qty FROM stock WHERE product_id = ?", (product_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        left = max(row[0] - qty, 0)
+        _conn.execute("UPDATE stock SET qty = ? WHERE product_id = ?", (left, product_id))
+        _conn.commit()
+        return left

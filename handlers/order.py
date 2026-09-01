@@ -126,9 +126,20 @@ def categories_kb() -> InlineKeyboardMarkup:
     return ikb(*rows)
 
 
+def sold_out(product) -> bool:
+    """Товар не можна замовити: або вимкнений у каталозі, або скінчився.
+    Залишок None — облік по цій позиції не ведеться (див. /remnants)."""
+    return not product.available or db.get_stock(product.id) == 0
+
+
 def category_kb(category_id: str) -> InlineKeyboardMarkup:
     rows = [
-        [(f"{p.title} — {p.price} грн", f"prod:{p.id}")]
+        [
+            (
+                f"{p.title} — {p.price} грн" + (" · немає" if sold_out(p) else ""),
+                f"prod:{p.id}",
+            )
+        ]
         for p in CATEGORY_BY_ID[category_id].products
     ]
     rows.append([(BACK, "menu:cats")])
@@ -447,7 +458,7 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             await callback.answer()
             return
         cat_id = next(c.id for c in CATEGORIES if any(p.id == product.id for p in c.products))
-        if not product.available:
+        if sold_out(product):
             # Позиція лишається в меню, але замовити її не можна — у стан
             # Shop.quantity не заходимо, щоб бот не питав кількість.
             await state.set_state(None)
@@ -489,6 +500,24 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             await message.answer("🗂 Оберіть категорію:", reply_markup=categories_kb())
             return
         cart = dict(cart_items(data))
+        # Більше, ніж лишилось на складі, у корзину не пускаємо. Те, що вже
+        # лежить у корзині, теж рахуємо — інакше ліміт обходиться повторним «+».
+        left = db.get_stock(product.id)
+        if left is not None:
+            free = left - cart.get(product.id, 0)
+            if free <= 0:
+                await state.set_state(None)
+                await message.answer(
+                    "Упс... Цього товару більше немає у наявності",
+                    reply_markup=categories_kb(),
+                )
+                return
+            if qty > free:
+                await message.answer(
+                    f"На жаль, доступно лише <b>{free} шт</b>. "
+                    "Напишіть, будь ласка, меншу кількість."
+                )
+                return
         cart[product.id] = cart.get(product.id, 0) + qty
         await state.update_data(cart=cart, pending_product=None)
         await state.set_state(None)
@@ -761,6 +790,27 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
                 )
             except Exception:
                 log.exception("Не вдалося попередити групу про офлайн-чергу")
+
+        # Списуємо залишки. Товари без заданої кількості (/remnants) не чіпаємо —
+        # для них обліку немає. Про ті, що скінчились, попереджаємо групу:
+        # інакше про це дізнаєшся лише тоді, коли клієнт упреться в «немає».
+        ended = [
+            PRODUCT_BY_ID[pid].title
+            for pid, qty in cart.items()
+            if pid in PRODUCT_BY_ID and db.take_stock(pid, qty) == 0
+        ]
+        if ended:
+            try:
+                await bot.send_message(
+                    cfg.admin_group_id,
+                    "🚫 <b>Закінчився товар:</b> "
+                    + ", ".join(html.escape(t) for t in ended)
+                    + "\nУ каталозі показується як «немає у наявності». "
+                    "Поповнити залишок: /remnants",
+                    message_thread_id=cfg.bot_topic_id,
+                )
+            except Exception:
+                log.warning("Не вдалося попередити групу про закінчення товару", exc_info=True)
 
         await state.clear()
         await swap(callback, "Головне меню. Оберіть дію:", main_kb())
