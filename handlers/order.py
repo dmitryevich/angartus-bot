@@ -132,6 +132,20 @@ def sold_out(product) -> bool:
     return not product.available or db.get_stock(product.id) == 0
 
 
+def product_card(product) -> str:
+    """Картка товару. Опис і залишок — необов'язкові: порожній опис не лишає
+    по собі порожнього рядка, а товар без обліку не показує кількості."""
+    lines = [f"📌 <b>{html.escape(product.title)}</b>"]
+    if product.description:
+        lines.append(html.escape(product.description))
+    left = db.get_stock(product.id)
+    if left is not None:
+        lines.append(f"📦 У наявності: <b>{left} шт</b>")
+    lines.append(f"Ціна: <b>{product.price} грн</b>")
+    lines.append("\n🔢 Скільки одиниць? Напишіть число:")
+    return "\n".join(lines)
+
+
 def category_kb(category_id: str) -> InlineKeyboardMarkup:
     rows = [
         [
@@ -476,14 +490,7 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             screen_msg_id=callback.message.message_id,
         )
         await state.set_state(Shop.quantity)
-        await swap(
-            callback,
-            f"📌 <b>{html.escape(product.title)}</b>\n"
-            f"{html.escape(product.description)}\n"
-            f"Ціна: <b>{product.price} грн</b>\n\n"
-            "🔢 Скільки одиниць? Напишіть число:",
-            back_kb(f"cat:{cat_id}"),
-        )
+        await swap(callback, product_card(product), back_kb(f"cat:{cat_id}"))
         await callback.answer()
 
     @router.message(Shop.quantity, F.text)
