@@ -130,8 +130,8 @@ class NotionService:
             "Тип": _select("Default"),
             "Запаковано": {"checkbox": False},
         }
-        if o.get("created_at"):
-            props["Дата"] = {"date": {"start": o["created_at"]}}
+        # Дати не пишемо: властивості «Дата» в базі немає, а час створення
+        # Notion веде сам (created_time) — саме за ним і сортуємо в /orders
         if o.get("receipt_upload_id"):
             props["Фото чека"] = {
                 "files": [{
@@ -194,7 +194,7 @@ class NotionService:
             f"/data_sources/{self._ds}/query",
             {
                 "filter": {"property": "Запаковано", "checkbox": {"equals": False}},
-                "sorts": [{"property": "Дата", "direction": "descending"}],
+                "sorts": [{"timestamp": "created_time", "direction": "descending"}],
                 "page_size": min(limit, 100),
             },
         )
