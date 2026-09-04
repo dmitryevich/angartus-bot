@@ -817,21 +817,19 @@ def build_order_router(cfg: Config, sheets: SheetsService, orders: NotionService
             except Exception:
                 log.warning("Не вдалося підготувати квитанцію для #%s", number, exc_info=True)
 
-        try:
-            page_id = await orders.create_order(order)
-            db.map_order_page(number, page_id, user.id, label)
-        except Exception:
-            log.exception("Notion недоступний, замовлення #%s йде в офлайн-чергу", number)
-            orders.queue_order(order)
+        # create_order_once сам перевіряє, чи замовлення вже в Notion, тому
+        # таймаут на створенні більше не породжує дубль. У групу про це не
+        # пишемо: замовлення вже прийшло туди повідомленням вище, а решта —
+        # у логах Railway.
+        page_id = await orders.create_order_once(order)
+        if page_id:
             try:
-                await bot.send_message(
-                    cfg.admin_group_id,
-                    f"⚠️ Замовлення {label} (#{number}): Notion недоступний — "
-                    "збережено локально, буде довантажено автоматично.",
-                    message_thread_id=cfg.bot_topic_id,
-                )
+                db.map_order_page(number, page_id, user.id, label)
             except Exception:
-                log.exception("Не вдалося попередити групу про офлайн-чергу")
+                log.exception("Не вдалося звязати замовлення #%s зі сторінкою Notion", number)
+        else:
+            log.error("Notion недоступний, замовлення #%s йде в офлайн-чергу", number)
+            orders.queue_order(order)
 
         # Списуємо залишки. Товари без заданої кількості (/remnants) не чіпаємо —
         # для них обліку немає. Про ті, що скінчились, попереджаємо групу:

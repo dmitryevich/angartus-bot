@@ -49,13 +49,13 @@ async def setup_commands(bot: Bot, cfg: Config) -> None:
         log.warning("Не вдалося поставити команди для адмін-групи", exc_info=True)
 
 
-async def pending_flush_loop(bot: Bot, cfg: Config, sheets: SheetsService) -> None:
+async def pending_flush_loop(orders: NotionService) -> None:
     while True:
         await asyncio.sleep(FLUSH_INTERVAL)
         try:
-            if not sheets.pending_count():
+            if not orders.pending_count():
                 continue
-            flushed = await sheets.flush_pending()
+            flushed = await orders.flush_pending()
             if flushed:
                 for item in flushed:
                     db.map_order_page(
@@ -64,11 +64,9 @@ async def pending_flush_loop(bot: Bot, cfg: Config, sheets: SheetsService) -> No
                 nums = ", ".join(
                     item.get("label") or f"#{item['number']}" for item in flushed
                 )
-                await bot.send_message(
-                    cfg.admin_group_id,
-                    f"✅ Зв'язок із Google Таблицею відновлено. Довантажено замовлення: {nums}.",
-                    message_thread_id=cfg.bot_topic_id,
-                )
+                # У групу не пишемо: ці замовлення там уже є, а «відновлено
+                # звязок» — службовий шум. Слід лишається в логах.
+                log.info("Довантажено замовлення з офлайн-черги: %s", nums)
         except Exception:
             log.exception("Помилка в циклі догрузки офлайн-черги")
 
@@ -90,7 +88,7 @@ async def main() -> None:
     dp.include_router(build_admin_router(cfg, sheets, orders))
     dp.include_router(build_client_router(cfg, sheets))
 
-    flush_task = asyncio.create_task(pending_flush_loop(bot, cfg, orders))
+    flush_task = asyncio.create_task(pending_flush_loop(orders))
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await setup_commands(bot, cfg)

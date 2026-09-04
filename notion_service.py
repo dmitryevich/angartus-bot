@@ -143,6 +143,53 @@ class NotionService:
             }
         return props
 
+    async def find_order(self, order: dict) -> str | None:
+        """Шукає вже створене замовлення за номером + телефоном + складом.
+        None — не знайдено або Notion не відповів."""
+        label = (order.get("label") or "").strip()
+        phone = (order.get("phone") or "").strip()
+        if not label or not phone:
+            return None
+        items = (order.get("items") or "").strip()
+        conditions = [
+            {"property": "Номер замовлення", "rich_text": {"equals": label[:2000]}},
+            {"property": "Телефон", "title": {"equals": phone[:2000]}},
+        ]
+        if items:
+            conditions.append(
+                {"property": "Склад замовлення", "rich_text": {"equals": items[:2000]}}
+            )
+        try:
+            res = await self._api(
+                "POST",
+                f"/data_sources/{self._ds}/query",
+                {"filter": {"and": conditions}, "page_size": 1},
+            )
+        except Exception:
+            log.warning("Не вдалося перевірити наявність замовлення %s", label, exc_info=True)
+            return None
+        results = res.get("results") or []
+        return results[0]["id"] if results else None
+
+    async def create_order_once(self, order: dict) -> str | None:
+        """Створює замовлення так, щоб не з'явився дубль. Повертає page_id.
+
+        Notion міг прийняти сторінку і не встигнути відповісти (таймаут,
+        обрив мережі). Тоді сторінка вже є, а бот вважав спробу невдалою,
+        ставив замовлення в офлайн-чергу — і за хвилину створював друге
+        таке саме. Тому дивимось до і після спроби, чи воно вже там.
+        None — Notion недоступний, замовлення треба ставити в чергу.
+        """
+        existing = await self.find_order(order)
+        if existing:
+            log.info("Замовлення %s вже є в Notion — дубль не створюю", order.get("label"))
+            return existing
+        try:
+            return await self.create_order(order)
+        except Exception:
+            log.exception("Не вдалося створити замовлення %s у Notion", order.get("label"))
+            return await self.find_order(order)
+
     async def create_order(self, order: dict) -> str:
         """Створює сторінку замовлення. Повертає page_id."""
         page = await self._api(
@@ -229,9 +276,8 @@ class NotionService:
         pending = self._load_pending()
         flushed = []
         while pending:
-            try:
-                page_id = await self.create_order(pending[0])
-            except Exception:
+            page_id = await self.create_order_once(pending[0])
+            if not page_id:
                 break
             done = pending.pop(0)
             flushed.append({
